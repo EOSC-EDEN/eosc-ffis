@@ -32,6 +32,11 @@ COPY src/ ./src/
 RUN pip install --no-cache-dir ".[dev]" \
     && chown -R ffis:ffis /app
 
+# Cache volume mount point. It must exist in the image and be owned by ffis:
+# Docker creates a missing mount point as root:root, and the non-root process
+# then cannot create the SQLite cache file in it.
+RUN mkdir -p /data && chown ffis:ffis /data
+
 USER ffis
 
 EXPOSE 8000
