@@ -1,0 +1,46 @@
+# Production compose file for the EOSC EU Node VM.
+#
+# Differs from the development docker-compose.yml in one important way:
+# the container port is published on the loopback interface only. nginx is the
+# only thing that talks to it, and the app is never reachable without TLS.
+#
+#   docker compose -f deploy/docker-compose.prod.yml up -d --build
+
+services:
+
+  ffis:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: eosc-ffis:latest
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      FFIS_SIEGFRIED_BINARY: sf
+      FFIS_MAGIKA_ENABLED: "true"
+      FFIS_TIKA_ENABLED: "false"
+      FFIS_CACHE_ENABLED: "true"
+      FFIS_CACHE_DB_PATH: /data/ffis_cache.db
+      # Keep this in sync with client_max_body_size in the nginx site config.
+      FFIS_MAX_UPLOAD_BYTES: "104857600"
+      # By-reference mode (/identify/path) is denied unless prefixes are listed.
+      # Only set this if you also mount the storage below.
+      # FFIS_ALLOWED_PATH_PREFIXES: /mnt/tda-storage
+    volumes:
+      - ffis-cache:/data
+      # - /mnt/tda-storage:/mnt/tda-storage:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  ffis-cache:
