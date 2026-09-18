@@ -181,6 +181,8 @@ All settings are environment variables prefixed `FFIS_`. Copy `.env.example` to 
 
 ## Deployment patterns
 
+For a step-by-step deployment as a public HTTPS service on an EOSC EU Node VM (OpenStack networking, EGI Dynamic DNS hostname, nginx reverse proxy, Let's Encrypt), see [docs/deployment.md](docs/deployment.md).
+
 ### Standalone container (small TDA)
 
 Use `docker compose up`. Siegfried runs inside the image; results are cached in a named volume.
