@@ -1,8 +1,22 @@
 # Deploying FFIS on an EOSC EU Node VM
 
-End-to-end runbook for running this service as a public HTTPS endpoint on a VM
-in the EOSC EU Node (PSNC OpenStack), with a hostname from EGI Dynamic DNS and
-a Let's Encrypt certificate.
+End-to-end runbook for running this service as a public HTTPS endpoint in the
+EOSC EU Node (PSNC OpenStack), with a hostname from EGI Dynamic DNS and a
+Let's Encrypt certificate.
+
+The FFIS VM has **no public IP**. It sits on the internal EDEN network, and
+the EDEN shared entry VM terminates TLS for every service hostname and
+proxies to it:
+
+```
+Internet --443--> entry VM (floating IP, nginx, certbot)
+                     |  plain HTTP over eden-net
+                     +--> ffis VM 192.168.0.20:8000 (Docker)
+```
+
+The entry VM is set up once per project and has its own runbook:
+[entry-vm.md](entry-vm.md). This document covers the FFIS side and what to
+hand to the entry VM owner.
 
 Worked example throughout:
 
@@ -12,11 +26,10 @@ Worked example throughout:
 | service            | `ffis`                        |
 | hostname           | `eden-ffis.vm.fedcloud.eu`    |
 | VM login user      | `ubuntu`                      |
-| floating IP        | `62.3.175.x` (assigned in A7) |
+| FFIS private IP    | `192.168.0.20` (assigned in A5) |
+| entry floating IP  | `62.3.175.x`                  |
 
-Substitute your own values. Parts A2 to A4 (network, subnet, router) are done
-once per project; if a colleague already created `eden-net` and `eden-router`,
-reuse them and start at A5.
+Substitute your own values.
 
 ---
 
@@ -37,7 +50,13 @@ Import the public key under **Compute -> Key Pairs -> Import Public Key**, type
 `SSH Key`. Upload the `.pub` file rather than pasting, to avoid stray line
 breaks.
 
-### A2. Network and subnet
+Send the same public key to the entry VM owner, together with your current
+IPv4 address, to get jump access (entry-vm.md, Part B). The key never needs to
+be copied anywhere else.
+
+### A2. Network and subnet (once per project)
+
+Skip A2 to A4 if `eden-net` and `eden-router` already exist.
 
 **Network -> Networks -> Create Network**
 
@@ -45,7 +64,7 @@ breaks.
 - Subnet tab: Name `eden-subnet`, Network Address `192.168.0.0/24`
 - Subnet Details: defaults
 
-### A3. Router
+### A3. Router (once per project)
 
 **Network -> Routers -> Create Router**
 
@@ -54,37 +73,19 @@ breaks.
   floating IPs; `PSNC-EXT-IPV6-PUB2-EDU` is IPv6 only and will not give you a
   floating IPv4)
 
-### A4. Attach the subnet to the router
+The router's external gateway is also what gives the FFIS VM outbound
+internet access (via SNAT) without a floating IP.
+
+### A4. Attach the subnet to the router (once per project)
 
 Open `eden-router` -> **Interfaces -> Add Interface** -> select `eden-subnet`
 -> Submit.
 
-### A5. Security group
+### A5. Launch the instance
 
-**Network -> Security Groups -> Create Security Group**, name `ffis-web`.
-Three ingress rules:
-
-| Port        | Remote CIDR    | Why                                                        |
-| ----------- | -------------- | ---------------------------------------------------------- |
-| 22 (SSH)    | `<your-IP>/32` | Administration. Never open 22 to `0.0.0.0/0` on a public VM |
-| 80 (HTTP)   | `0.0.0.0/0`    | Let's Encrypt HTTP-01 challenge and the 80 -> 443 redirect  |
-| 443 (HTTPS) | `0.0.0.0/0`    | The service itself                                          |
-
-Do **not** open 8000. The container publishes on loopback only and nginx
-proxies to it.
-
-Find your current IPv4 address:
-
-```bash
-curl -4 -s https://ifconfig.me       # macOS / Linux
-# curl.exe -4 -s https://ifconfig.me # Windows PowerShell
-```
-
-When you move between networks (home, office, VPN) your address changes and
-SSH stops working. Add another rule: **your group -> Manage Rules -> Add
-Rule**, SSH, CIDR `<new-IP>/32`, and put the location in the description.
-
-### A6. Launch the instance
+The `eden-service` security group must exist and allow ports 22 and 8000 from
+the `eden-entry` group (entry-vm.md, A2). Do not create a separate
+FFIS group with public rules.
 
 **Compute -> Instances -> Launch Instance**
 
@@ -96,23 +97,41 @@ Rule**, SSH, CIDR `<new-IP>/32`, and put the location in the description.
   running container holds the Magika model in memory, and uvicorn runs 2
   workers. 1 vCPU / 2 GB will build slowly and swap under concurrent uploads.
 - Networks: `eden-net`
-- Security Groups: `ffis-web`
+- Security Groups: `eden-service` (remove `default`)
 - Key Pair: the one from A1
+
+Do **not** associate a floating IP.
+
+Note the private IP shown on the instance row (`192.168.0.20` in this
+example). It stays fixed for the lifetime of the instance, and both the
+compose file (D3) and the entry VM's nginx config point at it.
 
 Disk sizing: the built image is roughly 2 to 3 GB (Python 3.11 slim, Magika
 and its ONNX runtime, the Siegfried binary and PRONOM signatures). With build
 cache, logs and the result cache, 40 GB is comfortable and 20 GB is the floor.
 
-### A7. Floating IP
+### A6. First login
 
-**Network -> Floating IPs -> Allocate IP To Project**, pool
-`PSNC-EXT-PUB1-EDU`. Then on the instance row: dropdown -> **Associate
-Floating IP** -> pick the instance port -> Associate.
+Add the FFIS VM to `~/.ssh/config` on your machine, going through the entry VM:
 
-Verify and do first-boot housekeeping:
+```
+Host eden-entry
+    HostName <entry-floating-IP>
+    User jump
+
+Host eden-ffis
+    HostName 192.168.0.20
+    User ubuntu
+    ProxyJump eden-entry
+```
+
+Then:
 
 ```bash
-ssh ubuntu@<floating-IP>
+ssh eden-ffis
+
+# Outbound access works through the router, not a floating IP
+curl -sI https://download.docker.com | head -1
 
 sudo apt update && sudo apt -y upgrade
 sudo apt -y install unattended-upgrades
@@ -129,19 +148,28 @@ Reference: https://docs.egi.eu/users/compute/cloud-compute/dynamic-dns/
 
 Log in at https://nsupdate.fedcloud.eu/ via EGI Check-in (your institutional
 account works). **Overview -> Add host**: hostname `eden-ffis`, domain
-`vm.fedcloud.eu`. The portal shows a secret exactly once - note it down.
+`vm.fedcloud.eu`. The portal shows a secret exactly once - note it down. The
+FFIS team keeps it; the entry VM owner does not need it.
 
 Full name: `eden-ffis.vm.fedcloud.eu`
 
-### B2. Point the name at the floating IP
+### B2. Point the name at the entry VM
 
-From the VM (so the update sees the VM's public source address):
+The hostname must resolve to the **entry VM's** floating IP. Pass it
+explicitly with `myip`; this can be run from anywhere:
 
 ```bash
-curl "https://eden-ffis.vm.fedcloud.eu:<secret>@nsupdate.fedcloud.eu/nic/update"
+curl "https://eden-ffis.vm.fedcloud.eu:<secret>@nsupdate.fedcloud.eu/nic/update?myip=<entry-floating-IP>"
 ```
 
-Expected response: `good <floating-IP>` (or `nochg <floating-IP>`).
+Expected response: `good <entry-floating-IP>` (or `nochg <entry-floating-IP>`).
+
+Do not leave out `myip` and run this from the FFIS VM. nsupdate would then
+record the router's SNAT address, and the hostname would point at the wrong
+place.
+
+Registered records do not expire, so this is a one-off unless the entry VM's
+floating IP changes.
 
 ### B3. Verify it resolves
 
@@ -152,109 +180,61 @@ dig +short eden-ffis.vm.fedcloud.eu          # macOS / Linux
 # Resolve-DnsName eden-ffis.vm.fedcloud.eu   # Windows PowerShell
 ```
 
-The answer must be your floating IP. Do not continue to Part C until it is -
-certbot will fail the HTTP-01 challenge otherwise, and repeated failures count
-against Let's Encrypt rate limits.
-
-### B4. Keep the record fresh (optional but recommended)
-
-The floating IP is static, so the record will not drift on its own. A weekly
-refresh protects against the record being aged out or reset. Store the secret
-root-only, never in the repository:
-
-```bash
-sudo install -m 600 /dev/null /etc/ffis-ddns.secret
-sudo tee /etc/ffis-ddns.secret >/dev/null <<'SECRET'
-https://eden-ffis.vm.fedcloud.eu:<secret>@nsupdate.fedcloud.eu/nic/update
-SECRET
-
-sudo tee /etc/cron.weekly/ffis-ddns >/dev/null <<'CRON'
-#!/bin/sh
-curl -fsS "$(cat /etc/ffis-ddns.secret)" >/dev/null
-CRON
-sudo chmod 755 /etc/cron.weekly/ffis-ddns
-```
+The answer must be the entry floating IP. Do not ask for the certificate
+(C2) until it is - certbot will fail the HTTP-01 challenge otherwise, and
+repeated failures count against Let's Encrypt rate limits.
 
 ---
 
-## Part C - nginx and HTTPS
+## Part C - Publishing through the entry VM
 
-### C1. Install nginx
+nginx and certbot run on the entry VM, not on the FFIS VM. If you are not the
+entry VM owner, send them the items below and they follow entry-vm.md,
+Part D.
 
-```bash
-systemctl is-active nginx || sudo apt -y install nginx
-sudo systemctl enable --now nginx
-```
+| Item                    | Value                                       |
+| ----------------------- | ------------------------------------------- |
+| Hostname                | `eden-ffis.vm.fedcloud.eu`                  |
+| Backend private IP:port | `192.168.0.20:8000`                         |
+| nginx site file         | `deploy/nginx-ffis.conf` in this repository |
 
-### C2. Install the FFIS site config
+### C1. The site config
 
-certbot's nginx plugin edits an existing server block; it does not invent one.
-Install the config from this repository (see `deploy/nginx-ffis.conf`) and
-disable the stock default site:
-
-```bash
-sudo cp deploy/nginx-ffis.conf /etc/nginx/sites-available/ffis
-sudo sed -i 's/eden-ffis\.vm\.fedcloud\.eu/<your-hostname>/' /etc/nginx/sites-available/ffis
-sudo ln -sf /etc/nginx/sites-available/ffis /etc/nginx/sites-enabled/ffis
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-That config is not just a `proxy_pass`. Two settings matter:
+`deploy/nginx-ffis.conf` is not just a `proxy_pass`. Two settings matter:
 
 - `client_max_body_size 100m` - nginx defaults to **1 MB**. Without this, every
   upload over 1 MB is rejected with a 413 by nginx before FFIS sees it, while
   the app itself happily accepts 100 MB. Keep this number and
-  `FFIS_MAX_UPLOAD_BYTES` in step D3 in sync.
+  `FFIS_MAX_UPLOAD_BYTES` in `deploy/docker-compose.prod.yml` in sync.
 - `proxy_read_timeout 180s` on `/identify` - identification of a large file
   through Siegfried and Magika can exceed nginx's 60 second default, which
   would surface as a 504 mid-request.
 
 It also rate limits `/identify` to 2 req/s per client IP with a burst of 10.
 A public identification endpoint is free CPU for anyone who finds it; drop or
-raise the limit deliberately, not by accident.
+raise the limit deliberately, not by accident. The limit applies to the real
+client IP, because the entry VM is the first hop.
 
-At this point nginx answers on port 80 but has nothing behind it yet - a 502 is
-the expected response until Part D. If you want to confirm the path end to end
-before deploying, `curl -I http://<your-hostname>/` from your laptop should
-return a 502 from nginx rather than a timeout. A timeout means the security
-group or DNS is wrong.
+The `upstream ffis_backend` block at the top holds the FFIS VM's private IP.
+It must match `FFIS_BIND_ADDR` in D3.
 
-### C3. Certificate
+### C2. Certificate
+
+Issued on the entry VM, one certificate per service:
 
 ```bash
-sudo snap install core; sudo snap refresh core
-sudo snap install --classic certbot
-sudo ln -sf /snap/bin/certbot /usr/local/bin/certbot
-
-# Dry run first - cheap, and does not burn rate limits
-sudo certbot certonly --nginx -d eden-ffis.vm.fedcloud.eu --dry-run
-
-# For real
 sudo certbot --nginx -d eden-ffis.vm.fedcloud.eu \
   --agree-tos --no-eff-email -m you@example.org --redirect
 ```
 
-`--redirect` makes certbot add the 80 -> 443 redirect to the site config.
-`--no-eff-email` opts out of the EFF mailing list.
-
-Verify:
-
-```bash
-curl -I http://eden-ffis.vm.fedcloud.eu/     # expect 301 to https
-curl -I https://eden-ffis.vm.fedcloud.eu/    # expect 502 for now, 200 after Part D
-```
-
-Renewal is automatic via the snap timer. Confirm:
-
-```bash
-systemctl list-timers | grep -i certbot
-sudo certbot renew --dry-run
-```
+Until Part D is done, `https://eden-ffis.vm.fedcloud.eu/` answers 502. That
+is expected: nginx is up, FFIS is not yet.
 
 ---
 
 ## Part D - Deploy FFIS
+
+All of this runs on the FFIS VM (`ssh eden-ffis`).
 
 ### D1. Install Docker
 
@@ -283,28 +263,40 @@ cd /opt/ffis
 
 ### D3. Start the service
 
+Tell compose which address to publish on - the VM's private IP:
+
 ```bash
-docker compose -f deploy/docker-compose.prod.yml up -d --build
+ip -4 -br addr show scope global     # the eden-net address, e.g. 192.168.0.20
+echo "FFIS_BIND_ADDR=192.168.0.20" > deploy/.env
+
+docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d --build
 ```
+
+`deploy/.env` is git-ignored, so `git pull` leaves it alone.
 
 The first build takes several minutes: it downloads the Siegfried binary,
 runs `sf -update` to fetch the PRONOM signature file, and installs Magika and
 onnxruntime.
 
 `deploy/docker-compose.prod.yml` differs from the development
-`docker-compose.yml` in one respect that matters here: it publishes on
-`127.0.0.1:8000` instead of `0.0.0.0:8000`. With the dev file, Docker inserts
-its own iptables rules ahead of the host firewall and the app would be exposed
-on port 8000 in the clear. The OpenStack security group still blocks it, but
-relying on a single layer for that is a bad habit.
+`docker-compose.yml` in one respect that matters here: it publishes on one
+address (`FFIS_BIND_ADDR`) instead of `0.0.0.0`. Docker inserts its own
+iptables rules ahead of the host firewall, so with the dev file the app would
+listen on every interface. The `eden-service` security group still limits
+port 8000 to the entry VM, but relying on a single layer for that is a bad
+habit. If `FFIS_BIND_ADDR` is unset, the port falls back to loopback: safe,
+but the entry VM cannot reach it and answers 502.
 
 Check it:
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml ps
-curl -s localhost:8000/health
-curl -s localhost:8000/tools | head
+docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml ps
+curl -s 192.168.0.20:8000/health
+curl -s 192.168.0.20:8000/tools | head
 ```
+
+`curl localhost:8000` does **not** work here, because the port is not bound
+on loopback.
 
 ### D4. Verify the public endpoint
 
@@ -329,27 +321,33 @@ curl -s -X POST https://eden-ffis.vm.fedcloud.eu/identify \
 ```bash
 cd /opt/ffis
 git pull
-docker compose -f deploy/docker-compose.prod.yml up -d --build
+docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d --build
 ```
 
 The PRONOM signature file is baked in at build time, so a periodic rebuild is
 also how signatures get refreshed. Rebuilding monthly is reasonable for a
 preservation service.
 
+Changes to `deploy/nginx-ffis.conf` do not take effect from `git pull` on the
+FFIS VM. They have to be installed on the entry VM (entry-vm.md, Part E).
+
 ### Logs
 
 ```bash
-docker compose -f deploy/docker-compose.prod.yml logs -f ffis
-sudo tail -f /var/log/nginx/ffis.access.log
+docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml logs -f ffis
 ```
 
 Container logs are capped at 3 x 10 MB by the compose file so they cannot fill
-the disk.
+the disk. The nginx access and error logs (`/var/log/nginx/ffis.*.log`) are on
+the entry VM.
 
 ### Reboots
 
 `restart: unless-stopped` plus an enabled `docker` service brings the container
-back automatically. Confirm after the first reboot rather than assuming it.
+back automatically. Because the port is bound to the private IP, Docker must
+start after the network is up; on Ubuntu 24.04 `docker.service` already waits
+for `network-online.target`. Confirm after the first reboot rather than
+assuming it.
 
 ### Security notes for a public deployment
 
@@ -361,9 +359,11 @@ back automatically. Confirm after the first reboot rather than assuming it.
 - CORS is `allow_origins=["*"]` (`src/ffis/main.py`). Fine for an anonymous
   read-only API, worth narrowing if authentication is ever added.
 - The service has no authentication. Anyone who finds the hostname can spend
-  its CPU. The nginx rate limit is the mitigation; for a non-public pilot, add
-  an IP allowlist or HTTP basic auth to the `location ~ ^/identify` block
-  instead.
+  its CPU. The nginx rate limit on the entry VM is the mitigation; for a
+  non-public pilot, add an IP allowlist or HTTP basic auth to the
+  `location ~ ^/identify` block instead.
+- Port 8000 on the FFIS VM is plain HTTP. That is acceptable only because
+  `eden-service` restricts it to the entry VM. Never open it more widely.
 - Uploads are held in memory during identification (`await file.read()` in
   `src/ffis/api/routes.py`). With 2 workers and a 100 MB limit, the worst case
   is around 200 MB of request buffers on top of the Magika model. This is
@@ -372,12 +372,17 @@ back automatically. Confirm after the first reboot rather than assuming it.
 
 ### Troubleshooting
 
-| Symptom                            | Likely cause                                                       |
-| ---------------------------------- | ------------------------------------------------------------------ |
-| SSH times out                      | Your IP changed; add a new port 22 rule to `ffis-web`               |
-| certbot HTTP-01 challenge fails    | DNS not yet pointing at the floating IP, or port 80 not open        |
-| 413 on upload                      | `client_max_body_size` missing or below `FFIS_MAX_UPLOAD_BYTES`     |
-| 504 on a large file                | `proxy_read_timeout` too low on `/identify`                         |
-| 502 from nginx                     | Container not running: check `docker compose ps` and the logs       |
-| 429 on `/identify`                 | nginx rate limit; raise it in the site config if legitimate traffic |
-| Build fails on `sf -update`        | Transient PRONOM fetch failure; rerun the build                     |
+| Symptom                            | Likely cause                                                        |
+| ---------------------------------- | ------------------------------------------------------------------- |
+| `ssh eden-ffis` fails at first hop | Your IP changed; ask the entry VM owner to add it to `eden-entry`    |
+| `ssh eden-ffis` fails at second hop | `eden-service` lacks port 22 from `eden-entry`                      |
+| `apt` / `docker pull` hangs        | Router has no external gateway, or SNAT is disabled                  |
+| Hostname resolves to wrong IP      | nsupdate called without `myip` (B2)                                  |
+| certbot HTTP-01 challenge fails    | Hostname does not resolve to the entry floating IP yet               |
+| 502 from nginx                     | Container down, or `FFIS_BIND_ADDR` unset so it bound to loopback    |
+| 504, or entry VM cannot `curl` the backend | `eden-service` lacks port 8000 from `eden-entry`             |
+| 413 on upload                      | `client_max_body_size` missing or below `FFIS_MAX_UPLOAD_BYTES`      |
+| 504 on a large file                | `proxy_read_timeout` too low on `/identify`                          |
+| 429 on `/identify`                 | nginx rate limit; raise it in the site config if legitimate traffic  |
+| Build fails on `sf -update`        | Transient PRONOM fetch failure; rerun the build                      |
+| Container fails to start after reboot ("cannot assign requested address") | Docker started before the private IP was up; `docker compose up -d` again and check `systemctl cat docker` |

@@ -1,0 +1,365 @@
+# EDEN shared entry VM
+
+Runbook for the single public entry point in front of all EDEN service VMs in
+the EOSC EU Node (PSNC OpenStack). This is done **once per project**, not once
+per service. Per-service runbooks (for FFIS: [deployment.md](deployment.md))
+assume this VM already exists.
+
+## Why
+
+Floating IPs are scarce. Instead of one floating IP per service VM, only the
+entry VM has one. Every service hostname resolves to that IP, nginx on the
+entry VM terminates TLS and picks the backend by hostname, and the service VMs
+sit on the internal network with no public address.
+
+```
+Internet --80/443--> entry VM (floating IP)
+                       nginx, certbot, one site file per service hostname
+                         |
+                         |  plain HTTP over eden-net (192.168.0.0/24)
+                         +--> ffis VM       192.168.0.20:8000
+                         +--> harvester VM  192.168.0.x:<port>
+                         +--> ...
+
+Admin SSH:  laptop --22--> entry VM --22--> service VM   (ProxyJump)
+```
+
+Hostnames are under `vm.fedcloud.eu` for now. Moving them to a project
+domain (`<service>.services.eden-fidelis.eu`) is planned separately in
+[project-domain.md](project-domain.md); it only affects the entry VM's nginx
+and certificates, never the service VMs.
+
+The approach was proven on the harvester VM (`eden-mock.vm.fedcloud.eu`, a
+second hostname with its own certificate running next to the harvester).
+
+## Ownership
+
+| Role                       | Who                     | Responsible for                                          |
+| -------------------------- | ----------------------- | -------------------------------------------------------- |
+| Entry VM owner             | Mattias Levlin (CSC)    | The VM, its nginx and certbot, onboarding new services   |
+| Entry VM backup owner      | TBD                     | Same, when the owner is unavailable                      |
+| Service owner (per service) | The service team        | Its service VM, its hostname, the content of its site file |
+| `eden-fidelis.eu` domain   | **TBD - open item**     | Delegating a subdomain to EGI DNS, see [project-domain.md](project-domain.md) |
+
+Conventions on the entry VM:
+
+- One nginx site file per service hostname, in
+  `/etc/nginx/sites-available/<service>`, named after the service. The service
+  team writes it (it encodes their upload limits and timeouts); the entry VM
+  owner installs it.
+- One certificate per service, covering that service's hostnames. Adding or
+  removing a service never touches another service's certificate.
+- `limit_req_zone` names are prefixed with the service name
+  (`ffis_identify`, `harvester_...`). They live in the shared `http` context
+  and must not collide.
+
+Worked example values:
+
+| Placeholder           | Example value              |
+| --------------------- | -------------------------- |
+| entry VM name         | `eden-entry`               |
+| entry floating IP     | `62.3.175.x`               |
+| VM login user         | `ubuntu`                   |
+| FFIS private IP       | `192.168.0.20`             |
+| FFIS hostname         | `eden-ffis.vm.fedcloud.eu` |
+
+---
+
+## Part A - OpenStack
+
+### A1. Network, subnet, router
+
+`eden-net` (`192.168.0.0/24`), `eden-subnet` and `eden-router` (external
+network `PSNC-EXT-PUB1-EDU`, subnet attached as an interface) are shared by all
+EDEN VMs. If they do not exist yet, create them as in
+[deployment.md, A2](deployment.md#a2-network-and-subnet-once-per-project).
+
+The router's external gateway also gives the service VMs **outbound** internet
+access via SNAT, so they can run `apt`, pull images and fetch signature files
+without a floating IP. Do not disable SNAT on the router.
+
+### A2. Security groups
+
+Two groups, created once. Use **remote security group** rules for internal
+traffic rather than CIDRs, so nobody has to track private IPs.
+
+**`eden-entry`** - attached to the entry VM only:
+
+| Port        | Remote                    | Why                                                       |
+| ----------- | ------------------------- | --------------------------------------------------------- |
+| 22 (SSH)    | CIDR `<admin-IP>/32`      | One rule per admin location. Never `0.0.0.0/0`            |
+| 80 (HTTP)   | CIDR `0.0.0.0/0`          | Let's Encrypt HTTP-01 challenges and the 80 -> 443 redirect |
+| 443 (HTTPS) | CIDR `0.0.0.0/0`          | All services                                              |
+
+**`eden-service`** - attached to every service VM:
+
+| Port                 | Remote                        | Why                                   |
+| -------------------- | ----------------------------- | ------------------------------------- |
+| 22 (SSH)             | Security group `eden-entry`   | SSH via the entry VM only             |
+| 8000 (FFIS backend)  | Security group `eden-entry`   | nginx on the entry VM -> FFIS         |
+| `<port>` (per service) | Security group `eden-entry` | One rule per backend port             |
+
+In the dashboard: **your group -> Manage Rules -> Add Rule**, pick the port,
+then **Remote: Security Group** and **Security Group: eden-entry**.
+
+Nothing else gets ingress on the service VMs. A backend port opened in
+`eden-service` applies to all service VMs, which is harmless: only the entry VM
+can reach it.
+
+### A3. Launch the entry VM
+
+**Compute -> Instances -> Launch Instance**
+
+- Details: name `eden-entry`
+- Source: `Ubuntu 24.04 LTS`, Create New Volume: **Yes**, 20 GB
+- Flavour: 2 vCPU / 2 GB RAM. nginx itself is light, but large uploads (FFIS
+  accepts 100 MB) are buffered through this VM on their way to the backend.
+- Networks: `eden-net`
+- Security Groups: `eden-entry` (remove `default`)
+- Key Pair: the entry VM owner's
+
+### A4. Floating IP
+
+**Network -> Floating IPs -> Allocate IP To Project**, pool
+`PSNC-EXT-PUB1-EDU`, then **Associate Floating IP** on the `eden-entry` row.
+
+If a service VM currently holds the project's only floating IP (as the
+harvester VM did during the trial), see Part F before moving it.
+
+First boot:
+
+```bash
+ssh ubuntu@<entry-floating-IP>
+
+sudo apt update && sudo apt -y upgrade
+sudo apt -y install unattended-upgrades
+sudo dpkg-reconfigure --priority=low unattended-upgrades
+```
+
+---
+
+## Part B - SSH access for service admins
+
+No new key pairs are needed. Admins keep their own keys; the entry VM only
+forwards the TCP connection, and the private key never leaves the admin's
+laptop.
+
+### B1. A jump-only account
+
+Service admins should not get the `ubuntu` account (which has sudo) on the
+entry VM. Create a `jump` account that can only forward connections:
+
+```bash
+sudo adduser --disabled-password --gecos "" jump
+sudo install -d -m 700 -o jump -g jump /home/jump/.ssh
+sudo install -m 600 -o jump -g jump /dev/null /home/jump/.ssh/authorized_keys
+
+sudo tee /etc/ssh/sshd_config.d/50-jump.conf >/dev/null <<'EOF'
+Match User jump
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    AllowTcpForwarding yes
+    ForceCommand /usr/sbin/nologin
+EOF
+sudo sshd -t && sudo systemctl reload ssh
+```
+
+Add each admin's **public** key as one line in
+`/home/jump/.ssh/authorized_keys`, with their name in the trailing comment so
+keys can be removed when people leave. Also add their source IP to the
+`eden-entry` port 22 rules.
+
+### B2. Client config
+
+Each admin adds this to `~/.ssh/config` on their own machine:
+
+```
+Host eden-entry
+    HostName <entry-floating-IP>
+    User jump
+
+Host eden-ffis
+    HostName 192.168.0.20
+    User ubuntu
+    ProxyJump eden-entry
+```
+
+Then `ssh eden-ffis` works directly, as does `scp`/`rsync`. One-off without a
+config file: `ssh -J jump@<entry-floating-IP> ubuntu@192.168.0.20`.
+
+Do not use agent forwarding (`ssh -A`) through the entry VM. `ProxyJump` does
+not need it.
+
+---
+
+## Part C - nginx base config
+
+### C1. Install
+
+```bash
+sudo apt -y install nginx
+sudo systemctl enable --now nginx
+```
+
+### C2. Catch-all and global settings
+
+Requests for hostnames the entry VM does not serve (scanners hitting the bare
+IP, stale DNS) should be dropped, not routed to whichever service happens to
+be first. Install the catch-all from this repository and remove the stock
+default site:
+
+```bash
+sudo cp deploy/nginx-entry-default.conf /etc/nginx/sites-available/00-default
+sudo ln -sf /etc/nginx/sites-available/00-default /etc/nginx/sites-enabled/00-default
+sudo rm -f /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+`curl -I http://<entry-floating-IP>/` should now fail with an empty reply.
+That is correct.
+
+### C3. certbot
+
+```bash
+sudo snap install core; sudo snap refresh core
+sudo snap install --classic certbot
+sudo ln -sf /snap/bin/certbot /usr/local/bin/certbot
+systemctl list-timers | grep -i certbot   # renewal timer is installed
+```
+
+---
+
+## Part D - Onboarding a service
+
+### D1. What the service team provides
+
+| Item                    | FFIS example                               |
+| ----------------------- | ------------------------------------------ |
+| Hostname                | `eden-ffis.vm.fedcloud.eu`                 |
+| Backend private IP:port | `192.168.0.20:8000`                        |
+| nginx site file         | `deploy/nginx-ffis.conf` in this repository |
+| Contact                 | The service team                           |
+
+The site file carries the service-specific settings. Do not install a service
+behind the entry VM with a generic `proxy_pass` only: nginx defaults to a
+**1 MB** upload limit and a 60 second read timeout, which break FFIS uploads
+and long identifications respectively.
+
+### D2. Point the hostname at the entry VM
+
+The hostname is registered at https://nsupdate.fedcloud.eu/ (EGI Check-in
+login) by the service team, who keep its secret. They point it at the entry
+VM's floating IP by passing `myip` explicitly:
+
+```bash
+curl "https://eden-ffis.vm.fedcloud.eu:<secret>@nsupdate.fedcloud.eu/nic/update?myip=<entry-floating-IP>"
+```
+
+`myip` matters. Without it, nsupdate records the source address of the
+request. Run from a service VM, that is the router's SNAT address, not the
+entry VM, and the hostname silently points at the wrong place.
+
+Records do not expire, so this is a one-off unless the entry VM's floating IP
+changes.
+
+Verify before going further (certbot fails otherwise, and failures count
+against Let's Encrypt rate limits):
+
+```bash
+dig +short eden-ffis.vm.fedcloud.eu    # must print the entry floating IP
+```
+
+### D3. Install the site file
+
+On the entry VM, with the service's site file and its two placeholders
+(hostname, backend address) filled in:
+
+```bash
+sudo cp nginx-ffis.conf /etc/nginx/sites-available/ffis
+sudo sed -i 's/eden-ffis\.vm\.fedcloud\.eu/<hostname>/; s/192\.168\.0\.20:8000/<backend-ip>:<port>/' \
+  /etc/nginx/sites-available/ffis
+sudo ln -sf /etc/nginx/sites-available/ffis /etc/nginx/sites-enabled/ffis
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Check the backend is reachable from the entry VM before involving certbot.
+If this times out, the `eden-service` rule for the backend port is missing:
+
+```bash
+curl -s http://192.168.0.20:8000/health
+```
+
+### D4. Certificate
+
+```bash
+sudo certbot certonly --nginx -d eden-ffis.vm.fedcloud.eu --dry-run
+sudo certbot --nginx -d eden-ffis.vm.fedcloud.eu \
+  --agree-tos --no-eff-email -m <owner-email> --redirect
+```
+
+### D5. Verify from outside
+
+```bash
+curl -I http://eden-ffis.vm.fedcloud.eu/     # 301 to https
+curl -s https://eden-ffis.vm.fedcloud.eu/health
+```
+
+### D6. Offboarding
+
+```bash
+sudo rm /etc/nginx/sites-enabled/<service> /etc/nginx/sites-available/<service>
+sudo certbot delete --cert-name <hostname>
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Ask the service team to delete or repoint the hostname in nsupdate.
+
+---
+
+## Part E - Operations
+
+- **Single point of failure.** If the entry VM is down, every EDEN service is
+  unreachable from outside, even though the service VMs are fine. Acceptable
+  for the pilot phase; revisit before anything production-like.
+- **Backups.** The state worth keeping is `/etc/nginx/sites-available/` and
+  `/etc/letsencrypt/`. Everything else is reproducible from this runbook.
+  Certificates can be reissued, but keep under the Let's Encrypt rate limits.
+- **Logs.** Each site file sets its own `access_log`/`error_log` under
+  `/var/log/nginx/<service>.*.log`. Service teams without an account on the
+  entry VM have to ask the owner for them.
+- **Changes to a site file** come from the service team (ideally as a change
+  to the file in their repository) and are installed by the entry VM owner.
+  Always `sudo nginx -t` before reloading: a syntax error in one service's file
+  stops nginx reloading for all of them.
+
+### Troubleshooting
+
+| Symptom                                 | Likely cause                                                        |
+| --------------------------------------- | ------------------------------------------------------------------- |
+| Empty reply / connection closed         | Hostname not in any `server_name`; the catch-all dropped it          |
+| 502 from nginx                          | Backend down, or bound to loopback instead of its private IP         |
+| 504, or `curl` to backend times out     | `eden-service` lacks a rule for the backend port from `eden-entry`   |
+| certbot HTTP-01 fails                   | Hostname does not yet resolve to the entry IP (check `myip`)         |
+| Hostname resolves to an unexpected IP   | nsupdate was called from a service VM without `myip`                 |
+| `ssh -J` fails at the second hop        | `eden-service` lacks port 22 from `eden-entry`, or wrong user/key    |
+| 413 on upload                           | Site file `client_max_body_size` missing or too low                  |
+
+---
+
+## Part F - Moving from the trial setup
+
+During the trial the harvester VM held the floating IP and served
+`eden-mock.vm.fedcloud.eu` itself. To move to a dedicated entry VM:
+
+1. Build the entry VM (Parts A to C) with a **new** floating IP if the quota
+   allows, so nothing goes down during the move. If it does not, schedule a
+   short outage: disassociate the IP from the harvester VM and associate it
+   with `eden-entry`.
+2. Onboard the harvester as a service (Part D), with its backend on its
+   private IP. Copy its existing certificate setup only if reissuing is a
+   problem; otherwise let certbot issue fresh ones on the entry VM.
+3. Repoint its hostnames with `myip=<entry-floating-IP>` and wait for DNS
+   (TTL is 1 minute).
+4. Remove the floating IP from the harvester VM and move it from its old
+   security group to `eden-service`.
