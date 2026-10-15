@@ -39,7 +39,7 @@ second hostname with its own certificate running next to the harvester).
 | Entry VM owner             | Mattias Levlin (CSC)    | The VM, its nginx and certbot, onboarding new services   |
 | Entry VM backup owner      | TBD                     | Same, when the owner is unavailable                      |
 | Service owner (per service) | The service team        | Its service VM, its hostname, the content of its site file |
-| `eden-fidelis.eu` domain   | **TBD - open item**     | Delegating a subdomain to EGI DNS, see [project-domain.md](project-domain.md) |
+| `eden-fidelis.eu` domain   | Trust-IT (request sent 2026-10-15) | Delegating a subdomain to EGI DNS, see [project-domain.md](project-domain.md) |
 
 Conventions on the entry VM:
 

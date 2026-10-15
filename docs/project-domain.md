@@ -4,10 +4,11 @@ Plan for giving EDEN services hostnames under the project's own domain, such
 as `ffis.services.eden-fidelis.eu`, instead of the generic
 `eden-ffis.vm.fedcloud.eu`.
 
-**Status (2026-10-08): open, blocked.** We do not yet know who administers
-DNS for `eden-fidelis.eu`. Nothing in this document can start until that is
-settled. Services launch on `vm.fedcloud.eu` names in the meantime, and the
-switch can happen later without touching any service VM.
+**Status (2026-10-15): waiting for Trust-IT.** Trust-IT maintains
+`eden-fidelis.eu`. The delegation request was sent to them via
+comms.fidelis@postit.csc.fi on 2026-10-15; we are waiting for their answer and
+a contact person. Services run on `vm.fedcloud.eu` names in the meantime, and
+the switch can happen later without touching any service VM.
 
 ## Why
 
@@ -39,7 +40,7 @@ terminates TLS. The service VMs never see the hostname change.
 
 | Role                         | Who                   | Does                                                  |
 | ---------------------------- | --------------------- | ----------------------------------------------------- |
-| `eden-fidelis.eu` DNS admin  | **TBD**               | Adds the `NS` records for `services` (once); checks CAA |
+| `eden-fidelis.eu` DNS admin  | Trust-IT (contact TBD, via comms.fidelis@postit.csc.fi) | Adds the `NS` records for `services` (once); checks CAA |
 | Requester                    | Entry VM owner (Mattias Levlin, CSC) | Opens the EGI Helpdesk ticket, coordinates the switch |
 | EGI Dynamic DNS support      | EGI Helpdesk          | Creates the project domain, provides name servers     |
 | Service teams                | Per service           | Register their host under the new domain              |
@@ -47,16 +48,14 @@ terminates TLS. The service VMs never see the hostname change.
 
 ## Open questions
 
-1. **Who administers DNS for `eden-fidelis.eu`?** Registrar account or DNS
-   hosting provider, and a person who can make changes there. This is the
-   blocker.
+1. **Who administers DNS for `eden-fidelis.eu`?** Trust-IT. Still needed: a
+   named contact who can make changes there (asked in the request).
 2. **How long will the domain live?** If `eden-fidelis.eu` lapses when the
    project ends, every service name under it breaks. Find out who pays for
    renewal and until when, before publishing these names anywhere permanent
    (papers, deliverables, registries).
-3. **Subdomain name.** `services.eden-fidelis.eu` is the working assumption.
-   Shorter alternatives (`svc.`) are possible; decide before the ticket, as
-   the name is fixed once delegated.
+3. **Subdomain name.** Decided: `services.eden-fidelis.eu` (as proposed to
+   Trust-IT).
 4. **Who can manage the domain in nsupdate.** It should be more than one EGI
    Check-in account, so it is not tied to a single person.
 
@@ -64,8 +63,10 @@ terminates TLS. The service VMs never see the hostname change.
 
 ### 1. Find the domain administrator
 
-Settle open questions 1 and 2. Share this document with them; their part is
-step 3 only.
+Done: Trust-IT maintains the domain. Request sent 2026-10-15 to
+comms.fidelis@postit.csc.fi, including the proposed `NS` records below.
+Remaining: get their agreement and a contact person, and settle open
+question 2. Their part is step 3 only.
 
 ### 2. EGI Helpdesk ticket
 
@@ -80,10 +81,11 @@ At https://helpdesk.egi.eu/, support unit **Dynamic DNS**. Draft:
 > services.eden-fidelis.eu, on nsupdate.fedcloud.eu, as other EOSC projects
 > have.
 >
-> We control eden-fidelis.eu and will delegate services.eden-fidelis.eu to
-> the EGI name servers. Could you tell us which name servers to delegate to,
-> and set the domain up so that it can be managed by the following EGI
-> Check-in accounts: <list>?
+> Trust-IT, who manages eden-fidelis.eu, has agreed to delegate
+> services.eden-fidelis.eu to the EGI name servers. Could you confirm which
+> name servers to delegate to (we assume ns02, ns03 and ns04.fedcloud.eu, as
+> for vm.fedcloud.eu), and set the domain up so that it can be managed by the
+> following EGI Check-in accounts: <list>?
 >
 > Thank you,
 > <name>, on behalf of the EDEN project
@@ -91,11 +93,13 @@ At https://helpdesk.egi.eu/, support unit **Dynamic DNS**. Draft:
 ### 3. Delegation (domain administrator)
 
 In the `eden-fidelis.eu` zone, add one `NS` record per name server EGI
-provided in step 2:
+confirmed in step 2. `vm.fedcloud.eu` uses these three, which is what was
+proposed to Trust-IT:
 
 ```
-services.eden-fidelis.eu.   3600  IN  NS  <egi-nameserver-1>.
-services.eden-fidelis.eu.   3600  IN  NS  <egi-nameserver-2>.
+services.eden-fidelis.eu.   3600  IN  NS  ns02.fedcloud.eu.
+services.eden-fidelis.eu.   3600  IN  NS  ns03.fedcloud.eu.
+services.eden-fidelis.eu.   3600  IN  NS  ns04.fedcloud.eu.
 ```
 
 Most DNS hosting panels have an "NS record" type for this; the name field is
