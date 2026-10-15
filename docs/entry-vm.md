@@ -5,6 +5,10 @@ the EOSC EU Node (PSNC OpenStack). This is done **once per project**, not once
 per service. Per-service runbooks (for FFIS: [deployment.md](deployment.md))
 assume this VM already exists.
 
+**Status (2026-10-15): planned, not built yet.** Today the ffis VM has its
+own floating IP and runs nginx itself; see
+[deployment.md, Current setup](deployment.md#current-setup-as-of-2026-10-15).
+
 ## Why
 
 Floating IPs are scarce. Instead of one floating IP per service VM, only the

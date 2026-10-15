@@ -1,8 +1,59 @@
 # Deploying FFIS on an EOSC EU Node VM
 
-End-to-end runbook for running this service as a public HTTPS endpoint in the
-EOSC EU Node (PSNC OpenStack), with a hostname from EGI Dynamic DNS and a
-Let's Encrypt certificate.
+Running this service as a public HTTPS endpoint in the EOSC EU Node (PSNC
+OpenStack), with a hostname from EGI Dynamic DNS and a Let's Encrypt
+certificate.
+
+There are two setups. The **current setup** is what runs today. The
+**planned setup** puts a shared entry VM in front of all EDEN services; it is
+not built yet. Parts A to E below are the runbook for the planned setup.
+
+## Current setup (as of 2026-10-15)
+
+One VM does everything: it has its own floating IP and runs nginx, certbot
+and the FFIS container.
+
+```
+Internet --80/443--> ffis VM 62.3.175.206 (floating IP)
+                       nginx + certbot (eden-ffis.vm.fedcloud.eu)
+                         |  http://127.0.0.1:8000
+                         +--> Docker container deploy-ffis-1
+```
+
+| Item                 | Value                                                        |
+| -------------------- | ------------------------------------------------------------ |
+| Hostname             | `eden-ffis.vm.fedcloud.eu` (EGI Dynamic DNS)                 |
+| VM                   | `ffis`, Ubuntu 24.04, 1 vCPU / 4 GB RAM / 40 GB disk         |
+| Floating IP          | `62.3.175.206` (private: `192.168.0.196`)                    |
+| Login                | `ssh -i ~/.ssh/eosc_ed25519 ubuntu@62.3.175.206`             |
+| Security group       | `ffis-web`: 80 and 443 open, 22 only from listed admin IPs   |
+| Code                 | `/opt/ffis`, branch `main`                                   |
+| Container            | `deploy/docker-compose.prod.yml`, published on `127.0.0.1:8000` |
+| nginx site           | `/etc/nginx/sites-available/ffis`, proxies to `127.0.0.1:8000` |
+| Certificate          | certbot, renewed by `snap.certbot.renew.timer`               |
+| Harvester            | Separate VM, `eden-harvester.vm.fedcloud.eu` (`62.3.175.110`), in another project |
+
+### Updating the current setup
+
+```bash
+ssh -i ~/.ssh/eosc_ed25519 ubuntu@62.3.175.206
+cd /opt/ffis
+git pull
+docker compose -f deploy/docker-compose.prod.yml up -d --build
+curl -s localhost:8000/health
+```
+
+Differences from the planned-setup runbook below:
+
+- **No `deploy/.env` and no `FFIS_BIND_ADDR`.** The container must stay on
+  `127.0.0.1`, because nginx on the same VM proxies there. Setting
+  `FFIS_BIND_ADDR` to the private IP makes the site answer 502.
+- **No jump host.** SSH goes straight to the floating IP.
+- **SSH hangs** if your public IP is not in `ffis-web`. Add an `SSH` rule
+  with CIDR `<your-IP>/32` in the OpenStack dashboard (Network -> Security
+  Groups -> `ffis-web` -> Manage Rules).
+
+## Planned setup
 
 The FFIS VM has **no public IP**. It sits on the internal EDEN network, and
 the EDEN shared entry VM terminates TLS for every service hostname and
@@ -17,6 +68,11 @@ Internet --443--> entry VM (floating IP, nginx, certbot)
 The entry VM is set up once per project and has its own runbook:
 [entry-vm.md](entry-vm.md). This document covers the FFIS side and what to
 hand to the entry VM owner.
+
+Moving from the current setup: the project quota allows only **one floating
+IP**, which the ffis VM holds today. The entry VM would take it over, so the
+hostname keeps pointing at the same address. The quota also leaves one more
+instance and one more vCPU, which is enough for a small entry VM.
 
 Worked example throughout:
 
