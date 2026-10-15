@@ -1,10 +1,15 @@
-# Production compose file for the EOSC EU Node VM.
+# Production compose file for the FFIS VM in the EOSC EU Node.
 #
 # Differs from the development docker-compose.yml in one important way:
-# the container port is published on the loopback interface only. nginx is the
-# only thing that talks to it, and the app is never reachable without TLS.
+# the container port is published on one interface only, never 0.0.0.0. In
+# the EDEN setup that is the VM's private IP on eden-net, where nginx on the
+# shared entry VM reaches it (docs/entry-vm.md). Set it in deploy/.env:
 #
-#   docker compose -f deploy/docker-compose.prod.yml up -d --build
+#   echo "FFIS_BIND_ADDR=192.168.0.20" > deploy/.env
+#   docker compose --env-file deploy/.env -f deploy/docker-compose.prod.yml up -d --build
+#
+# Without FFIS_BIND_ADDR it falls back to loopback, which is safe but
+# unreachable from the entry VM (nginx answers 502).
 
 services:
 
@@ -14,7 +19,7 @@ services:
       dockerfile: Dockerfile
     image: eosc-ffis:latest
     ports:
-      - "127.0.0.1:8000:8000"
+      - "${FFIS_BIND_ADDR:-127.0.0.1}:8000:8000"
     environment:
       FFIS_SIEGFRIED_BINARY: sf
       FFIS_MAGIKA_ENABLED: "true"
