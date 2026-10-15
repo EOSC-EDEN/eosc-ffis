@@ -45,7 +45,7 @@ async def identify_by_value(
     max_bytes = request.app.state.settings.max_upload_bytes
     content = await file.read(max_bytes + 1)
     if len(content) > max_bytes:
-        raise HTTPException(status_code=413, detail=f"File too large. Maximum size is {max_bytes // (1024*1024)} MB.")
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum size is {max_bytes // (1024*1024)} MiB.")
     sha256 = _sha256(content)
 
     if cache:

@@ -12,7 +12,7 @@ Siegfried and Magika are mocked so the tests run without external binaries.
 
 import hashlib
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Iterator, Optional
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -193,9 +193,13 @@ class TestOrchestratorConflictResolution:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def test_client() -> TestClient:
-    from ffis.main import app
-    return TestClient(app)
+def test_client(tmp_path, monkeypatch) -> Iterator[TestClient]:
+    from ffis.main import app, settings
+    # Keep the test cache out of the shared default path
+    monkeypatch.setattr(settings, "cache_db_path", str(tmp_path / "cache.db"))
+    # Entering the client runs the app lifespan, which sets up engines and cache
+    with TestClient(app) as client:
+        yield client
 
 
 class TestAPIEndpoints:

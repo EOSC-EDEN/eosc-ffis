@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     api_port: int = 8000
 
     # Security
-    max_upload_bytes: int = 100 * 1024 * 1024  # 100 MB
+    max_upload_bytes: int = 100 * 1024 * 1024  # 100 MiB
     allowed_path_prefixes: list[str] = []  # e.g. ["/mnt/storage"] — empty = deny all
 
     @field_validator("allowed_path_prefixes", mode="before")
